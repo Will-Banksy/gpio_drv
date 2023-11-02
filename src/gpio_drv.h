@@ -7,9 +7,9 @@
 #define GPIODRV_IOCTL_SELECTPIN 3
 
 typedef struct gpio_pin {
-	bool value;
-	unsigned int pin_num;
-	bool output;
+	u8 value;
+	u32 pin_num;
+	u8 output;
 } gpio_pin;
 
 #endif // GPIO_DRV_H
