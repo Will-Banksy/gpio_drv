@@ -1,15 +1,6 @@
-# KERNEL := ~/rpisrc/linux
-# PWD := $(shell pwd)
-# obj-m += $(shell cat target/objects.txt)
-
-# all:
-# 	@mkdir -p target/src
-# 	@echo $(obj-m)
-
-# 	make ARCH=arm CROSS_COMPILE=$(CROSS) -C $(KERNEL) M=$(PWD) modules
-
-# clean:
-# 	make -C $(KERNEL) M=$(PWD) clean
+# E.g.
+# make KERNEL=~/rpisrc/linux CROSS=~/rpi_tools/arm-bcm2708/arm-linux-gnueabihf/bin/arm-linux-gnueabihf-
+#     (for linux src in ~/rpisrc/linux and raspberrypi/tools at ~/rpi_tools)
 
 TARGET := $(shell pwd | xargs basename)
 
@@ -19,4 +10,4 @@ all:
 
 clean:
 	rm -rf target
-	rm *.ko
+	rm -f *.ko

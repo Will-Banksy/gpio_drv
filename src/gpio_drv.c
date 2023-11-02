@@ -1,10 +1,11 @@
 #include <linux/module.h>
-
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/gpio.h>
 #include <linux/uaccess.h>
+
+#include "gpio_drv.h"
 
 // Module metadata - visible with modinfo
 MODULE_LICENSE("GPL");
@@ -15,12 +16,25 @@ MODULE_VERSION("0.1");
 // Constants
 #define GPIODRV_DEVICE_NAME "gpio_drv"
 #define GPIODRV_CLASS_NAME "class_gpio_drv"
-#define GPIODRV_PIN 25
+#define GPIODRV_DEFAULT_PIN 25
+#define GPIODRV_DEFAULT_OUTPUT true
 
 // Static variables
 static int s_DeviceMajor;
 static struct class* s_ChrdevClass = NULL;
 static struct device* s_ChrdevDevice = NULL;
+static int s_GpioPin;
+static bool s_GpioOutput;
+
+// Macros - Allows easier configuring of how the driver works overall, as well as making my code more DRY
+#define gpiodrv_request() if(gpio_is_valid(s_GpioPin) < 0) { return -ENODEV; } else if(gpio_request(s_GpioPin, "gpio_drv_pin") < 0) { return -EAGAIN; }
+#define gpiodrv_request_unsafe() gpio_request(s_GpioPin, "gpio_drv_pin");
+#define gpiodrv_configure() if(s_GpioOutput) { gpio_direction_output(s_GpioPin, 0); } else { gpio_direction_input(s_GpioPin); }
+#define gpiodrv_setup() gpiodrv_request(); gpiodrv_configure();
+#define gpiodrv_setup_unsafe() gpiodrv_request_unsafe(); gpiodrv_configure();
+#define gpiodrv_set(value) gpio_set_value(s_GpioPin, value);
+#define gpiodrv_get(value) gpio_get_value(s_GpioPin);
+#define gpiodrv_free() gpiodrv_set(0); gpio_free(s_GpioPin);
 
 // File operations
 
@@ -36,9 +50,9 @@ static int gpio_drv_frelease(struct inode* inode, struct file* file) {
 
 static ssize_t gpio_drv_fread(struct file* file, char* buffer, size_t length, loff_t* offset) {
 	int gpio_val;
-	
+
 	// Get the GPIO value of the pin, then set the output buffer to that value in ASCII
-	gpio_val = gpio_get_value(GPIODRV_PIN);
+	gpio_val = gpiodrv_get();
 	gpio_val += '0';
 	memset(buffer, gpio_val, length);
 
@@ -58,12 +72,12 @@ static ssize_t gpio_drv_fwrite(struct file* file, const char* buffer, size_t len
 
 		// Then set the GPIO pin to low for '0' or high for '1'
 		if(last_written == '0') {
-			gpio_set_value(GPIODRV_PIN, 0);
-			pr_info("gpio_drv: Set GPIO pin %u to low", GPIODRV_PIN);
+			gpiodrv_set(0);
+			pr_info("gpio_drv: Set GPIO pin %u to low", s_GpioPin);
 			break;
 		} else if(last_written == '1') {
-			gpio_set_value(GPIODRV_PIN, 1);
-			pr_info("gpio_drv: Set GPIO pin %u to high", GPIODRV_PIN);
+			gpiodrv_set(1);
+			pr_info("gpio_drv: Set GPIO pin %u to high", s_GpioPin);
 			break;
 		} else {
 			i--;
@@ -75,8 +89,66 @@ static ssize_t gpio_drv_fwrite(struct file* file, const char* buffer, size_t len
 	return length;
 }
 
+static long gpio_drv_ioctl(struct file* file, unsigned int cmd, unsigned long arg) {
+	gpio_pin pin;
+
+	pr_info("gpio_drv: ioctl cmd %u\n", cmd);
+
+	switch(cmd) {
+		case GPIODRV_IOCTL_NOTHING:
+			break;
+
+		case GPIODRV_IOCTL_WRITEPIN: {
+			if((void*)arg == NULL) {
+				return -EBADMSG;
+			}
+
+			pin = *(gpio_pin*)arg;
+
+			gpiodrv_set(pin.value);
+
+			break;
+		}
+		
+		case GPIODRV_IOCTL_READPIN: {
+			if((void*)arg == NULL) {
+				return -EBADMSG;
+			}
+
+			pin = *(gpio_pin*)arg;
+
+			pin.value = gpiodrv_get();
+
+			break;
+		}
+		
+		case GPIODRV_IOCTL_SELECTPIN: {
+			if((void*)arg == NULL) {
+				return -EBADMSG;
+			}
+
+			pin = *(gpio_pin*)arg;
+
+			gpiodrv_free();
+
+			s_GpioPin = pin.pin_num;
+			s_GpioOutput = pin.output;
+
+			gpiodrv_setup();
+
+			break;
+		}
+
+		default:
+			return -ENOIOCTLCMD;
+	}
+
+	return 0;
+}
+
 struct file_operations gpio_drv_fops = {
 	.owner = THIS_MODULE,
+	.unlocked_ioctl = gpio_drv_ioctl,
 	.open = gpio_drv_fopen,
 	.release = gpio_drv_frelease,
 	.read = gpio_drv_fread,
@@ -88,7 +160,10 @@ struct file_operations gpio_drv_fops = {
 // LKM init/exit
 
 static int __init gpio_drv_init(void) {
-	pr_info("Initialising gpio_drv...\n");
+	pr_info("gpio_drv: Initialising...\n");
+
+	s_GpioPin = GPIODRV_DEFAULT_PIN;
+	s_GpioOutput = GPIODRV_DEFAULT_OUTPUT;
 
 	// Register new character device with a dynamically allocated major number
 	s_DeviceMajor = register_chrdev(0, GPIODRV_DEVICE_NAME, &gpio_drv_fops);
@@ -117,13 +192,13 @@ static int __init gpio_drv_init(void) {
 	}
 	pr_info("gpio_drv: Device created\n");
 
-	// Using the linux GPIO library, request access to the GPIO pin (idk what label does),
+	// Using the legacy linux GPIO library, request access to the GPIO pin (idk what label does),
 	// set it as output and set it's value to 1
-	gpio_request(GPIODRV_PIN, "A1");
-	gpio_direction_output(GPIODRV_PIN, 0);
-	gpio_set_value(GPIODRV_PIN, 1);
+	// TODO: Upgrade to new descriptor library
+	gpiodrv_setup();
+	gpio_set_value(s_GpioPin, 1);
 
-	pr_info("gpio_drv initialised\n");
+	pr_info("gpio_drv: Initialised\n");
 
 	return 0;
 }
@@ -136,8 +211,9 @@ static void __exit gpio_drv_exit(void) {
 	unregister_chrdev(s_DeviceMajor, GPIODRV_DEVICE_NAME);
 
 	// Set the GPIO pin value to 0 and release it
-	gpio_set_value(GPIODRV_PIN, 0);
-	gpio_free(GPIODRV_PIN);
+	gpiodrv_setup_unsafe();
+	gpio_set_value(s_GpioPin, 0);
+	gpio_free(s_GpioPin);
 
 	pr_info("gpio_drv exited\n");
 }
