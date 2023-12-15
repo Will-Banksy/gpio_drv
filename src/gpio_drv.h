@@ -3,10 +3,11 @@
 
 #include <asm-generic/int-ll64.h>
 
-#define GPIODRV_IOCTL_NOTHING 0
-#define GPIODRV_IOCTL_WRITEPIN 1
-#define GPIODRV_IOCTL_READPIN 2
-#define GPIODRV_IOCTL_SELECTPIN 3
+#define GPIODRV_IOCTL_NOTHING 50
+#define GPIODRV_IOCTL_WRITEPIN 51
+#define GPIODRV_IOCTL_READPIN 52
+#define GPIODRV_IOCTL_OPENPIN 53
+#define GPIODRV_IOCTL_CLOSEPIN 54
 
 typedef struct gpio_pin {
 	/// 1 for high, 0 for low (secretly a bool)

@@ -16,7 +16,7 @@ MODULE_VERSION("0.1");
 // Constants
 #define GPIODRV_DEVICE_NAME "gpio_drv"
 #define GPIODRV_CLASS_NAME "class_gpio_drv"
-#define GPIODRV_DEFAULT_PIN 25
+#define GPIODRV_DEFAULT_PIN -1
 #define GPIODRV_DEFAULT_OUTPUT true
 #define GPIODRV_NUM_OPEN_PINS 20
 
@@ -27,7 +27,7 @@ static struct device* s_ChrdevDevice = NULL;
 /// The currently selected GPIO pin - most recently opened
 static int s_GpioPin;
 static bool s_GpioOutput;
-static gpio_pin s_OpenPins[]; // TODO: Reformat whole LKM to work on multiple open pins simultaneously. Maybe though, have it work like it is, but track pins not explicitly closed and then add an IOCTL to close them
+static gpio_pin s_OpenPins[GPIODRV_NUM_OPEN_PINS]; // TODO: Reformat whole LKM to work on multiple open pins simultaneously. Maybe though, have it work like it is, but track pins not explicitly closed and then add an IOCTL to close them
 
 // Macros - Allows easier configuring of how the driver works overall, as well as making my code more DRY
 #define gpiodrv_request() if(gpio_is_valid(s_GpioPin) < 0) { return -ENODEV; } else if(gpio_request(s_GpioPin, "gpio_drv_pin") < 0) { return -EAGAIN; }
@@ -39,6 +39,58 @@ static gpio_pin s_OpenPins[]; // TODO: Reformat whole LKM to work on multiple op
 #define gpiodrv_get(value) gpio_get_value(s_GpioPin);
 #define gpiodrv_free() gpiodrv_set(0); gpio_free(s_GpioPin);
 
+// Utility fns
+
+static void util_init_open_pins(void) {
+	int i;
+	for (i = 0; i < GPIODRV_NUM_OPEN_PINS; i++) {
+		s_OpenPins[i].pin_num = -1;
+	}
+}
+
+static gpio_pin* util_get_opened_pin(int pin_num) {
+	int i;
+	for (i = 0; i < GPIODRV_NUM_OPEN_PINS; i++) {
+		if(s_OpenPins[i].pin_num == pin_num) {
+			return &s_OpenPins[i];
+		}
+	}
+
+	return NULL;
+}
+
+static void util_add_pin(gpio_pin* pin) {
+	int i;
+	for (i = 0; i < GPIODRV_NUM_OPEN_PINS; i++) {
+		if(s_OpenPins[i].pin_num == -1) {
+			s_OpenPins[i] = *pin;
+			break;
+		}
+	}
+}
+
+static void util_rem_pin(int pin_num) {
+	int i;
+	for (i = 0; i < GPIODRV_NUM_OPEN_PINS; i++) {
+		if(s_OpenPins[i].pin_num == pin_num) {
+			s_OpenPins[i].pin_num = -1;
+			break;
+		}
+	}
+}
+
+static void cleanup_opened(void) {
+	int i;
+	for (i = 0; i < GPIODRV_NUM_OPEN_PINS; i++) {
+		if(s_OpenPins[i].pin_num != -1) {
+			s_GpioPin = s_OpenPins[i].pin_num;
+			gpiodrv_free();
+			s_OpenPins[i].pin_num = -1;
+		}
+	}
+}
+
+
 // File operations
 
 static int gpio_drv_fopen(struct inode* inode, struct file* file) {
@@ -48,6 +100,7 @@ static int gpio_drv_fopen(struct inode* inode, struct file* file) {
 
 static int gpio_drv_frelease(struct inode* inode, struct file* file) {
 	pr_info("gpio_drv: %s\n", __func__);
+	cleanup_opened();
 	return 0;
 }
 
@@ -93,7 +146,8 @@ static ssize_t gpio_drv_fwrite(struct file* file, const char* buffer, size_t len
 }
 
 static long gpio_drv_ioctl(struct file* file, unsigned int cmd, unsigned long arg) {
-	gpio_pin pin;
+	gpio_pin* pin;
+	gpio_pin* opened_pin;
 
 	pr_info("gpio_drv: ioctl cmd %u\n", cmd);
 
@@ -103,41 +157,85 @@ static long gpio_drv_ioctl(struct file* file, unsigned int cmd, unsigned long ar
 
 		case GPIODRV_IOCTL_WRITEPIN: {
 			if((void*)arg == NULL) {
-				return -EBADMSG;
+				return -EINVAL;
 			}
 
-			pin = *(gpio_pin*)arg;
+			pin = (gpio_pin*)arg;
 
-			gpiodrv_set(pin.value);
+			s_GpioPin = pin->pin_num;
+			s_GpioOutput = pin->output;
+
+			opened_pin = util_get_opened_pin(s_GpioPin);
+
+			// pr_info("gpio_drv: Opened pin ptr: %u", opened_pin);
+
+			if(opened_pin != NULL && opened_pin->output == 1) {
+				gpiodrv_set(pin->value);
+			} else {
+				return -EINVAL;
+			}
 
 			break;
 		}
 
 		case GPIODRV_IOCTL_READPIN: {
 			if((void*)arg == NULL) {
-				return -EBADMSG;
+				return -EINVAL;
 			}
 
-			pin = *(gpio_pin*)arg;
+			pin = (gpio_pin*)arg;
 
-			pin.value = gpiodrv_get();
+			s_GpioPin = pin->pin_num;
+			s_GpioOutput = pin->output;
+
+			opened_pin = util_get_opened_pin(s_GpioPin);
+
+			if(opened_pin != NULL && opened_pin->output == 0) {
+				pin->value = gpiodrv_get();
+				pr_info("gpio_drv: Read pin value: %u", pin->value);
+			} else {
+				return -EINVAL;
+			}
 
 			break;
 		}
 
-		case GPIODRV_IOCTL_SELECTPIN: {
+		case GPIODRV_IOCTL_OPENPIN: {
 			if((void*)arg == NULL) {
-				return -EBADMSG;
+				return -EINVAL;
 			}
 
-			pin = *(gpio_pin*)arg;
+			pin = (gpio_pin*)arg;
+
+			s_GpioPin = pin->pin_num;
+			s_GpioOutput = pin->output;
+
+			pr_info("gpio_drv: Opening pin %u", s_GpioPin);
+
+			gpiodrv_setup();
+
+			pr_info("gpio_drv: Adding pin %u to array", s_GpioPin);
+
+			util_add_pin(pin);
+
+			pr_info("gpio_drv: Opened pin %u", s_GpioPin);
+
+			break;
+		}
+
+		case GPIODRV_IOCTL_CLOSEPIN: {
+			if((void*)arg == NULL) {
+				return -EINVAL;
+			}
+
+			pin = (gpio_pin*)arg;
+
+			s_GpioPin = pin->pin_num;
+			s_GpioOutput = pin->output;
 
 			gpiodrv_free();
 
-			s_GpioPin = pin.pin_num;
-			s_GpioOutput = pin.output;
-
-			gpiodrv_setup();
+			util_rem_pin(s_GpioPin);
 
 			break;
 		}
@@ -195,11 +293,17 @@ static int __init gpio_drv_init(void) {
 	}
 	pr_info("gpio_drv: Device created\n");
 
-	// Using the legacy linux GPIO library, request access to the GPIO pin (idk what label does),
-	// set it as output and set it's value to 1
-	// TODO: Upgrade to new descriptor library
-	gpiodrv_setup();
-	gpio_set_value(s_GpioPin, 1);
+	util_init_open_pins();
+
+	if(s_GpioPin != -1) {
+		// Using the legacy linux GPIO library, request access to the GPIO pin (idk what label does),
+		// set it as output and set it's value to 1
+		// TODO: Upgrade to new descriptor library
+		gpiodrv_setup();
+		gpio_set_value(s_GpioPin, 1);
+
+		s_OpenPins[0] = (gpio_pin) { .output = 1, .pin_num = s_GpioPin, .value = 1};
+	}
 
 	pr_info("gpio_drv: Initialised\n");
 
