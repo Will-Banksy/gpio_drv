@@ -27,7 +27,7 @@ static struct device* s_ChrdevDevice = NULL;
 /// The currently selected GPIO pin - most recently opened
 static int s_GpioPin;
 static bool s_GpioOutput;
-static gpio_pin s_OpenPins[GPIODRV_NUM_OPEN_PINS]; // TODO: Reformat whole LKM to work on multiple open pins simultaneously. Maybe though, have it work like it is, but track pins not explicitly closed and then add an IOCTL to close them
+static gpio_pin s_OpenPins[GPIODRV_NUM_OPEN_PINS];
 
 // Macros - Allows easier configuring of how the driver works overall, as well as making my code more DRY
 #define gpiodrv_request() if(gpio_is_valid(s_GpioPin) < 0) { return -ENODEV; } else if(gpio_request(s_GpioPin, "gpio_drv_pin") < 0) { return -EAGAIN; }
@@ -89,7 +89,6 @@ static void cleanup_opened(void) {
 		}
 	}
 }
-
 
 // File operations
 
